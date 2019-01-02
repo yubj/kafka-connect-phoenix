@@ -1,6 +1,8 @@
 package io.kafka.connect.phoenix.parser;
 
 import io.kafka.connect.phoenix.PhoenixClient;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.junit.Assert;
@@ -47,6 +49,44 @@ public class PhoenixClientTest {
     String[] rowkeyColumns = new String[]{"name", "code"};
     final String result = phoenixClient.formDelete(tableName, rowkeyColumns);
     Assert.assertEquals("delete from \"hbase\".\"test2\" where \"name\" = ? and \"code\" = ?",
+        result);
+  }
+
+  @Test
+  public void testFormCreate() {
+    final Schema schema = SchemaBuilder.struct().name("test").version(1)
+        .field("id", Schema.INT64_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .field("age", Schema.INT8_SCHEMA)
+        .build();
+    final String[] rowkeyColumns = new String[]{"id"};
+    final String tableName = "hbase.test";
+    final String result = phoenixClient.formCreate(tableName, schema, rowkeyColumns);
+    Assert.assertEquals(
+        "create table if not exists \"hbase\".\"test\" (\"id\" bigint,\"name\" varchar,\"age\" tinyint,constraint pk primary key (\"id\"))",
+        result);
+  }
+
+  @Test
+  public void testFormUpsertSelect() {
+    final Schema schema = SchemaBuilder.struct().name("test").version(1)
+        .field("id", Schema.INT64_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .field("age", Schema.INT8_SCHEMA)
+        .build();
+    final String[] rowkeyColumns = new String[]{"id"};
+    final List<String> tableFiledNames = new ArrayList<>();
+    tableFiledNames.add("id");
+    tableFiledNames.add("name");
+    final String tableName = "hbase.test";
+    final String toTableName = "hbase.test_temp";
+    final List<String> toTableFiledNames = new ArrayList<>();
+    toTableFiledNames.add("id");
+    toTableFiledNames.add("name_r");
+    final String result = phoenixClient.formUpsert(tableFiledNames, tableName, toTableFiledNames,
+        toTableName);
+    Assert.assertEquals(
+        "upsert into \"hbase\".\"test_temp\" (\"id\",\"name_r\" ) select \"id\",\"name\" from \"hbase\".\"test\"",
         result);
   }
 }

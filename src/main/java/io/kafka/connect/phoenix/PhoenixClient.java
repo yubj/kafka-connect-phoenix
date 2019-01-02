@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.xml.bind.DatatypeConverter;
 import org.apache.commons.collections.map.HashedMap;
 import org.apache.kafka.connect.data.Field;
@@ -63,9 +64,6 @@ public class PhoenixClient {
     this.oldTableFieldNames = new HashedMap();
   }
 
-  /**
-   *
-   */
   public String formUpsert(final Schema schema, final String tableName) {
     StringBuilder query = new StringBuilder("upsert into ");
     query.append(convertTableName(tableName));
@@ -76,6 +74,23 @@ public class PhoenixClient {
     query.append(schema.fields().stream().map(f -> "?")
         .collect(Collectors.joining(",")));
     query.append(")");
+    log.debug("Query formed " + query);
+    return query.toString();
+  }
+
+  public String formUpsert(final List<String> fromFieldNames, final String formTableName,
+      final List<String> toFieldNames, final String toTableName) {
+    StringBuilder query = new StringBuilder("upsert into ");
+    query.append(convertTableName(toTableName));
+    query.append(" (");
+    query.append(toFieldNames.stream().map(c -> "\"" + c + "\"")
+        .collect(Collectors.joining(",")));
+    query.append(" )");
+    query.append(" select ");
+    query.append(fromFieldNames.stream().map(c -> "\"" + c + "\"")
+        .collect(Collectors.joining(",")));
+    query.append(" from ");
+    query.append(convertTableName(formTableName));
     log.debug("Query formed " + query);
     return query.toString();
   }
@@ -119,10 +134,8 @@ public class PhoenixClient {
   public String formAddColumn(final String tableName, Field field) {
     StringBuilder query = new StringBuilder("alter table ");
     query.append(convertTableName(tableName));
-    query.append(" add ");
-    query.append("\"" + field.name() + "\"");
-    query.append(" ");
-    query.append(convertToPhoenixType(field));
+    query.append(" add if not exists ");
+    query.append("\"" + field.name() + "\" " + convertToPhoenixType(field));
     Schema schema = field.schema();
     Object defaultValue = schema.defaultValue();
     if (defaultValue != null) {
@@ -351,10 +364,39 @@ public class PhoenixClient {
           .collect(Collectors.toList());
       log.debug("old names: {}", oldNames);
       log.debug("new names: {}", newNames);
-      List<String> dropNames = oldNames.stream().filter(n -> !newNames.contains(n))
+      //重命名后的字段名称必须为原字段名称_r
+      Map<String, Field> changNames = rowSchema.fields().stream().filter(f -> {
+        String newName = f.name();
+        return oldNames.contains(newName.substring(0, newName.length() - "_r".length()));
+      }).collect(Collectors.toMap(field -> {
+        String newName = field.name();
+        return newName.substring(0, newName.length() - "_r".length());
+      }, field -> field));
+      if (changNames.size() > 0) {
+        log.debug("change names: {}", changNames);
+        List<String> newTableFieldNames = Stream.concat(changNames.values().stream()
+            .map(Field::name), Arrays.stream(rowkeyColumns)).collect(Collectors.toList());
+        List<String> tableFieldNames = Stream.concat(changNames.keySet().stream(),
+            Arrays.stream(rowkeyColumns)).collect(Collectors.toList());
+        try (final Connection connection = this.connectionManager.getConnection();
+            final Statement statement = connection.createStatement()) {
+          connection.setAutoCommit(false);
+          for (Field f : changNames.values()) {
+            statement.execute(formAddColumn(tableName, f));
+          }
+          statement.execute(formUpsert(tableFieldNames, tableName, newTableFieldNames,
+              tableName));
+          updateTableFieldNames(tableName, schemaFile, newNames);
+          connection.commit();
+        } catch (SQLException e) {
+          throw new RuntimeException(e);
+        }
+      }
+      List<String> dropNames = oldNames.stream()
+          .filter(n -> !newNames.contains(n))
           .collect(Collectors.toList());
       List<Field> addFields = rowSchema.fields().stream()
-          .filter(f -> !oldNames.contains(f.name()))
+          .filter(f -> !changNames.values().contains(f) && !oldNames.contains(f.name()))
           .collect(Collectors.toList());
       if (dropNames.size() > 0 || addFields.size() > 0) {
         try (final Connection connection = this.connectionManager.getConnection();
@@ -362,14 +404,14 @@ public class PhoenixClient {
           connection.setAutoCommit(false);
           if (dropNames.size() > 0) {
             log.debug("drop names: {}", dropNames);
-            for (int i = 0; i < dropNames.size(); i++) {
-              schemaSt.execute(formDropColumn(tableName, dropNames.get(i)));
+            for (String dropName : dropNames) {
+              schemaSt.execute(formDropColumn(tableName, dropName));
             }
           }
           if (addFields.size() > 0) {
             log.debug("add fields: {}", addFields);
-            for (int i = 0; i < addFields.size(); i++) {
-              schemaSt.execute(formAddColumn(tableName, addFields.get(i)));
+            for (Field addField : addFields) {
+              schemaSt.execute(formAddColumn(tableName, addField));
             }
           }
           updateTableFieldNames(tableName, schemaFile, newNames);
